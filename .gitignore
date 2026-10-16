@@ -1,0 +1,25 @@
+# 编译产物
+*.exe
+*.pdb
+*.dll
+*.obj
+*.ilk
+
+# 构建临时文件
+*_bom.cs
+bin/
+obj/
+
+# 运行时数据（程序自己写到 %APPDATA%\MonitorSwitch）
+settings.ini
+usage.csv
+
+# 编辑器
+.vs/
+.vscode/
+*.user
+*.suo
+
+# 其他
+Thumbs.db
+desktop.ini
