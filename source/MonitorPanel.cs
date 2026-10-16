@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -84,6 +85,18 @@ internal sealed class MonitorPanel : Form
     private readonly System.Windows.Forms.Timer fadeTimer;
 
     private Label statusLine, colorSoft;
+    private Label sleepStatus;
+    private Button sleepNowBtn, sleepCancelBtn;
+    private Button[] sleepPicks;
+    private System.Windows.Forms.Timer sleepTimer;
+    private DateTime sleepAt = DateTime.MinValue;
+    private int sleepPick = 0;
+    private static readonly int[] SleepMinutes = new int[] { 15, 30, 60 };
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    private const uint WM_SYSCOMMAND = 0x0112;
+    private const int SC_MONITORPOWER = 0xF170;
     private DateTime lastReadUtc = DateTime.MinValue;
     private Button autoStartBtn;
 
@@ -549,25 +562,30 @@ internal sealed class MonitorPanel : Form
         contrastVal.BringToFront();
         inner.Controls.Add(cCard);
 
-        // ---- 色温 ----
-        Panel tCard = MkCard("色温预设", 464, 96);
-        colorStatus = MkLabelTall("", 186, 4, 138, 30, 9.5, CText);
-        colorStatus.TextAlign = ContentAlignment.MiddleRight;
-        colorSoft = MkLabelTall("", 12, 28, 312, 20, 8.5, CAccent);
-        colorButtons = new Button[3];
-        for (int i = 0; i < 3; i++)
+        // ---- 屏幕待机 ----
+        Panel slCard = MkCard("屏幕待机", 464, 114);
+        sleepStatus = MkLabelTall("未启用", 130, 6, 194, 24, 9.5, CDim);
+        sleepStatus.TextAlign = ContentAlignment.MiddleRight;
+        slCard.Controls.Add(sleepStatus);
+        sleepStatus.BringToFront();
+        sleepNowBtn = MkButton("立即关闭屏幕（待机）", 12, 34, 312, 32, delegate { ScreenOffNow(); });
+        sleepNowBtn.BackColor = CTint;
+        sleepNowBtn.ForeColor = CTintText;
+        slCard.Controls.Add(sleepNowBtn);
+        sleepPicks = new Button[SleepMinutes.Length];
+        for (int i = 0; i < SleepMinutes.Length; i++)
         {
-            uint val = ColorValues[i];
-            Button b = MkButton(ColorNames[i], 12 + i * 106, 48, 100, 30, delegate { RunVcp(0x14, val, "色温已切换"); });
-            colorButtons[i] = b;
-            tCard.Controls.Add(b);
+            int mins = SleepMinutes[i];
+            sleepPicks[i] = MkButton(mins + " 分", 12 + i * 78, 74, 74, 32, delegate { PickSleep(mins); });
+            slCard.Controls.Add(sleepPicks[i]);
         }
-        tCard.Controls.Add(MkLabelTall("6500K 这一档本机固件拒绝 DDC 写入，需要在显示器 OSD 里选", 12, 78, 312, 18, 7.5, CDim));
-        tCard.Controls.Add(colorStatus);
-        tCard.Controls.Add(colorSoft);
-        colorStatus.BringToFront();
-        colorSoft.BringToFront();
-        inner.Controls.Add(tCard);
+        sleepCancelBtn = MkButton("取消", 12 + SleepMinutes.Length * 78, 74, 74, 32, delegate
+        {
+            CancelSleepTimer();
+            Status("已取消定时关屏");
+        });
+        slCard.Controls.Add(sleepCancelBtn);
+        inner.Controls.Add(slCard);
         FitInner(inner);
     }
 
@@ -615,7 +633,27 @@ internal sealed class MonitorPanel : Form
         tempVal.BringToFront();
         inner.Controls.Add(wCard);
 
-        Panel sCard = MkCard("场景（一键套用）", 204, 110);
+        // ---- 色温预设（硬件 DDC 0x14）：和软件色温放在一起，方便对照两层 ─---
+        Panel tCard = MkCard("色温预设（显示器硬件）", 204, 96);
+        colorStatus = MkLabelTall("", 186, 4, 138, 30, 9.5, CText);
+        colorStatus.TextAlign = ContentAlignment.MiddleRight;
+        colorSoft = MkLabelTall("", 12, 28, 312, 20, 8.5, CAccent);
+        colorButtons = new Button[3];
+        for (int i = 0; i < 3; i++)
+        {
+            uint val = ColorValues[i];
+            Button b = MkButton(ColorNames[i], 12 + i * 106, 48, 100, 30, delegate { RunVcp(0x14, val, "色温已切换"); });
+            colorButtons[i] = b;
+            tCard.Controls.Add(b);
+        }
+        tCard.Controls.Add(MkLabelTall("6500K 这一档本机固件拒绝 DDC 写入，需要在显示器 OSD 里选", 12, 78, 312, 18, 7.5, CDim));
+        tCard.Controls.Add(colorStatus);
+        tCard.Controls.Add(colorSoft);
+        colorStatus.BringToFront();
+        colorSoft.BringToFront();
+        inner.Controls.Add(tCard);
+
+        Panel sCard = MkCard("场景（一键套用）", 308, 110);
         sceneStatus = MkLabelTall("", 176, 4, 148, 22, 8.5, CText);
         sceneStatus.TextAlign = ContentAlignment.MiddleRight;
         sCard.Controls.Add(sceneStatus);
@@ -630,7 +668,7 @@ internal sealed class MonitorPanel : Form
         sCard.Controls.Add(MkButton("恢复默认（亮度 70 / 对比度 50 / 不调光 / 6500K）", 12, 70, 312, 28, delegate { ResetAll(); }));
         inner.Controls.Add(sCard);
 
-        Panel nCard = MkCard("说明", 322, 100);
+        Panel nCard = MkCard("说明", 426, 100);
         nCard.Controls.Add(MkLabelTall("· 软件调光只压暗画面、不动背光；Windows 要求每通道最亮点 ≥ 50%，所以最暗约 51%，色温越暖能压得越浅", 12, 28, 312, 34, 7.5, CDim));
         nCard.Controls.Add(MkLabelTall("· HDR 开启时，硬件亮度和软件 Gamma 都不生效", 12, 68, 312, 26, 7.5, CDim));
         inner.Controls.Add(nCard);
@@ -804,6 +842,91 @@ internal sealed class MonitorPanel : Form
         else
         {
             modeStatus.Text = err;
+        }
+    }
+
+    // ==================== 屏幕待机 ====================
+    /// 让显示器进入待机（等于电源菜单里的"关闭显示器"；动一下鼠标或按键盘唤醒）
+    public void ScreenOff()
+    {
+        HidePanel();
+        try
+        {
+            SendMessage(Handle, WM_SYSCOMMAND, (IntPtr)SC_MONITORPOWER, (IntPtr)2);
+        }
+        catch { }
+    }
+
+    private void ScreenOffNow()
+    {
+        CancelSleepTimer();
+        Status("显示器已进入待机（动一下鼠标或按键盘唤醒）");
+        Application.DoEvents();      // 先把状态行画出来，再关屏
+        ScreenOff();
+    }
+
+    /// 定时关屏；再点同一档 = 取消
+    private void PickSleep(int minutes)
+    {
+        if (sleepPick == minutes)
+        {
+            CancelSleepTimer();
+            Status("已取消定时关屏");
+            return;
+        }
+        if (sleepTimer == null)
+        {
+            sleepTimer = new System.Windows.Forms.Timer();
+            sleepTimer.Interval = 1000;
+            sleepTimer.Tick += delegate { TickSleep(); };
+        }
+        sleepPick = minutes;
+        sleepAt = DateTime.Now.AddMinutes(minutes);
+        sleepTimer.Start();
+        Status("已设置 " + minutes + " 分钟后关闭屏幕");
+        RefreshSleepUi();
+    }
+
+    private void TickSleep()
+    {
+        if (sleepAt == DateTime.MinValue) return;
+        if ((sleepAt - DateTime.Now).TotalSeconds <= 0)
+        {
+            CancelSleepTimer();
+            Status("定时到：显示器进入待机（动一下鼠标或按键盘唤醒）");
+            Application.DoEvents();
+            ScreenOff();
+            return;
+        }
+        RefreshSleepUi();
+    }
+
+    private void CancelSleepTimer()
+    {
+        sleepPick = 0;
+        sleepAt = DateTime.MinValue;
+        if (sleepTimer != null) sleepTimer.Stop();
+        RefreshSleepUi();
+    }
+
+    private void RefreshSleepUi()
+    {
+        if (sleepStatus == null) return;
+        if (sleepAt != DateTime.MinValue)
+        {
+            TimeSpan left = sleepAt - DateTime.Now;
+            if (left.TotalSeconds < 0) left = TimeSpan.Zero;
+            sleepStatus.Text = ((int)left.TotalMinutes) + " 分 " + left.Seconds.ToString("00") + " 秒后关屏";
+            sleepStatus.ForeColor = CAccent;
+        }
+        else
+        {
+            sleepStatus.Text = "未启用";
+            sleepStatus.ForeColor = CDim;
+        }
+        if (sleepPicks != null)
+        {
+            for (int i = 0; i < sleepPicks.Length; i++) SetButtonActive(sleepPicks[i], sleepPick == SleepMinutes[i]);
         }
     }
 

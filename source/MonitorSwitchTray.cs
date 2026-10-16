@@ -426,6 +426,9 @@ internal sealed class TrayApp : ApplicationContext
         ToolStripMenuItem openSet = new ToolStripMenuItem("设置…（快捷键）");
         openSet.Click += delegate { OpenSettings(); };
         menu.Items.Add(openSet);
+        ToolStripMenuItem sleepItem = new ToolStripMenuItem("关闭屏幕（待机）");
+        sleepItem.Click += delegate { ScreenOffOnce(); };
+        menu.Items.Add(sleepItem);
 
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem refresh = new ToolStripMenuItem("刷新状态");
@@ -650,6 +653,56 @@ internal sealed class TrayApp : ApplicationContext
             }
         }
         catch { }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    private const uint WM_SYSCOMMAND = 0x0112;
+    private const int SC_MONITORPOWER = 0xF170;
+
+    /// 版本号（发版时改这里；--version 会打印）
+    public const string AppVersion = "0.2.0";
+
+    /// 建一个屏幕外的隐藏窗口（用来承载 SC_MONITORPOWER 消息，不需要托盘实例）
+    private static Form MakeHiddenSender()
+    {
+        Form f = new Form();
+        f.ShowInTaskbar = false;
+        f.FormBorderStyle = FormBorderStyle.None;
+        f.StartPosition = FormStartPosition.Manual;
+        f.Location = new Point(-4000, -4000);
+        f.Size = new Size(1, 1);
+        f.Show();
+        return f;
+    }
+
+    /// 立即关屏（显示器进入待机；动一下鼠标或按键盘唤醒）
+    public static void ScreenOffOnce()
+    {
+        Form f = MakeHiddenSender();
+        try { SendMessage(f.Handle, WM_SYSCOMMAND, (IntPtr)SC_MONITORPOWER, (IntPtr)2); }
+        catch { }
+        Application.DoEvents();
+        f.Close();
+        f.Dispose();
+    }
+
+    /// 命令行用：N 分钟后关屏（本进程驻留到关屏后自己退出）
+    public static void ScreenOffLater(int minutes)
+    {
+        Form f = MakeHiddenSender();
+        System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
+        t.Interval = minutes * 60 * 1000;
+        t.Tick += delegate
+        {
+            t.Stop();
+            t.Dispose();
+            try { SendMessage(f.Handle, WM_SYSCOMMAND, (IntPtr)SC_MONITORPOWER, (IntPtr)2); }
+            catch { }
+            f.Close();
+        };
+        t.Start();
+        Application.Run(f);
     }
 
     /// --panel-demo：面板摆在固定位置（不依赖鼠标），seconds 秒后自动退出，用于截图核对
@@ -989,6 +1042,28 @@ internal static class Program
             }
             catch { }
             string a0 = args[0].ToLowerInvariant();
+            if (a0 == "--version" || a0 == "-v")
+            {
+                Console.WriteLine("MonitorControl v" + TrayApp.AppVersion);
+                return 0;
+            }
+            if (a0 == "--screen-off")
+            {
+                TrayApp.ScreenOffOnce();
+                return 0;
+            }
+            if (a0 == "--screen-off-in")
+            {
+                int mins;
+                if (args.Length < 2 || !int.TryParse(args[1], out mins) || mins <= 0)
+                {
+                    Console.Error.WriteLine("用法: --screen-off-in 30");
+                    return 1;
+                }
+                Console.WriteLine("已设置 " + mins + " 分钟后关闭屏幕（本进程会驻留到关屏后自动退出）");
+                TrayApp.ScreenOffLater(mins);
+                return 0;
+            }
             if (a0 == "--set-mode" && args.Length >= 4)
             {
                 int mw, mh, mhz;
